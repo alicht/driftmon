@@ -9,8 +9,68 @@ import sys
 import os
 import json
 import yaml
+import hashlib
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
+
+
+def canon_bytes(path: Path) -> str:
+    """
+    Normalize text/JSON/YAML content from a file.
+    
+    Args:
+        path: Path to the file to canonicalize
+        
+    Returns:
+        Normalized string representation of the file content
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    
+    content = path.read_text(encoding='utf-8')
+    suffix = path.suffix.lower()
+    
+    if suffix == '.json':
+        # Parse and re-serialize JSON with sorted keys
+        try:
+            data = json.loads(content)
+            return json.dumps(data, sort_keys=True, separators=(',', ':'))
+        except json.JSONDecodeError:
+            # If not valid JSON, treat as text
+            pass
+    
+    elif suffix in ['.yaml', '.yml']:
+        # Parse and re-serialize YAML with sorted keys
+        try:
+            data = yaml.safe_load(content)
+            return yaml.dump(data, sort_keys=True, default_flow_style=False)
+        except yaml.YAMLError:
+            # If not valid YAML, treat as text
+            pass
+    
+    # Default: normalize newlines for text files
+    # Convert all line endings to Unix style
+    return content.replace('\r\n', '\n').replace('\r', '\n')
+
+
+def fingerprint(path: Path) -> Tuple[str, str]:
+    """
+    Generate a SHA-256 hash and canonical text for a file.
+    
+    Args:
+        path: Path to the file to fingerprint
+        
+    Returns:
+        Tuple of (hash, canonical_text)
+    """
+    canonical_text = canon_bytes(path)
+    
+    # Calculate SHA-256 hash of the canonical text
+    hash_obj = hashlib.sha256()
+    hash_obj.update(canonical_text.encode('utf-8'))
+    hash_value = hash_obj.hexdigest()
+    
+    return (hash_value, canonical_text)
 
 
 class Driftmon:
@@ -76,6 +136,22 @@ class Driftmon:
             # TODO: Create default config
         
         print("Hello driftmon! Initialization complete.")
+    
+    def hash(self, file_path: str):
+        """Calculate and display hash of a file"""
+        path = Path(file_path)
+        
+        try:
+            hash_value, canonical_text = fingerprint(path)
+            print(f"File: {file_path}")
+            print(f"SHA-256: {hash_value}")
+            print(f"Canonical size: {len(canonical_text)} bytes")
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error processing file: {e}")
+            sys.exit(1)
 
 
 def main():
@@ -120,6 +196,13 @@ def main():
     # Status command
     status_parser = subparsers.add_parser("status", help="Show drift monitoring status")
     
+    # Hash command
+    hash_parser = subparsers.add_parser("hash", help="Calculate hash of a file")
+    hash_parser.add_argument(
+        "file",
+        help="File path to hash"
+    )
+    
     args = parser.parse_args()
     
     # Create driftmon instance
@@ -134,6 +217,8 @@ def main():
         driftmon.check(args.file)
     elif args.command == "status":
         driftmon.status()
+    elif args.command == "hash":
+        driftmon.hash(args.file)
     else:
         print("Hello driftmon!")
         print("Use --help to see available commands")
