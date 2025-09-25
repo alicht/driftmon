@@ -167,16 +167,24 @@ class Driftmon:
             print(f"Alerts enabled: {self.config.get('alerts', {}).get('enabled', False)}")
     
     def init(self):
-        """Initialize driftmon in the current directory"""
-        print("Initializing driftmon...")
+        """Initialize driftmon in the current directory and take baseline snapshot"""
+        print("🚀 Initializing driftmon...")
         self._ensure_directories()
         
         # Create default config if it doesn't exist
         if not self.config_path.exists():
-            print(f"Creating default configuration at {self.config_path}")
+            print(f"📄 Creating default configuration at {self.config_path}")
             # TODO: Create default config
+            
+        print("📸 Taking baseline snapshot...")
+        self.snapshot()
         
-        print("Hello driftmon! Initialization complete.")
+        print("\n✅ Driftmon initialization complete!")
+        print("📋 Next steps:")
+        print("  • Run 'driftmon snapshot' to take additional snapshots")
+        print("  • Run 'driftmon diff' to compare snapshots")
+        print("  • Run 'driftmon alert' to check for drift and send alerts")
+        print("  • Run 'driftmon run' for full snapshot + diff + alert workflow")
     
     def hash(self, file_path: str):
         """Calculate and display hash of a file"""
@@ -702,6 +710,44 @@ class Driftmon:
             print(f"\n✅ Alerts sent via: {', '.join(alerts_sent)}")
         else:
             print("\n⚠️  No alerts were sent (check configuration)")
+        
+        return diff_data['total']  # Return number of changes for exit code
+    
+    def run(self):
+        """Full workflow: snapshot + diff + alert"""
+        print("🔄 Running full driftmon workflow...")
+        print("-" * 50)
+        
+        # Step 1: Take snapshot
+        print("📸 Step 1: Taking new snapshot")
+        self.snapshot()
+        print()
+        
+        # Step 2: Check for drift
+        print("🔍 Step 2: Checking for drift")
+        diff_data = self.diff(return_changes=True)
+        
+        if not diff_data:
+            print("⚠️  Not enough snapshots to compare.")
+            return 0
+            
+        changes_count = diff_data['total']
+        
+        if changes_count == 0:
+            print("✅ No drift detected")
+            return 0
+        
+        print(f"🚨 Drift detected: {changes_count} changes")
+        print()
+        
+        # Step 3: Send alerts if drift found
+        print("📢 Step 3: Processing alerts")
+        alert_result = self.alert()
+        
+        print("-" * 50)
+        print(f"🏁 Workflow complete: {changes_count} changes detected")
+        
+        return changes_count
 
 
 def main():
@@ -762,33 +808,63 @@ def main():
     # Alert command
     alert_parser = subparsers.add_parser("alert", help="Check for drift and send alerts if configured")
     
+    # Run command
+    run_parser = subparsers.add_parser("run", help="Full workflow: snapshot + diff + alert")
+    
     args = parser.parse_args()
     
     # Create driftmon instance
     driftmon = Driftmon(config_path=args.config)
     
-    # Execute command
-    if args.command == "init":
-        driftmon.init()
-    elif args.command == "watch":
-        driftmon.watch(args.paths if args.paths else None)
-    elif args.command == "check":
-        driftmon.check(args.file)
-    elif args.command == "status":
-        driftmon.status()
-    elif args.command == "hash":
-        driftmon.hash(args.file)
-    elif args.command == "snapshot":
-        driftmon.snapshot()
-    elif args.command == "diff":
-        driftmon.diff()
-    elif args.command == "alert":
-        driftmon.alert()
-    else:
-        print("Hello driftmon!")
-        print("Use --help to see available commands")
-        parser.print_help()
-        sys.exit(0)
+    # Execute command with proper exit codes
+    exit_code = 0
+    
+    try:
+        if args.command == "init":
+            driftmon.init()
+        elif args.command == "watch":
+            driftmon.watch(args.paths if args.paths else None)
+        elif args.command == "check":
+            driftmon.check(args.file)
+        elif args.command == "status":
+            driftmon.status()
+        elif args.command == "hash":
+            driftmon.hash(args.file)
+        elif args.command == "snapshot":
+            driftmon.snapshot()
+        elif args.command == "diff":
+            driftmon.diff()  # Show normal output
+            diff_data = driftmon.diff(return_changes=True)  # Get data for exit code
+            if diff_data and diff_data['total'] > 0:
+                exit_code = 2  # Drift detected
+        elif args.command == "alert":
+            changes_count = driftmon.alert()
+            if changes_count and changes_count > 0:
+                exit_code = 2  # Drift detected
+        elif args.command == "run":
+            changes_count = driftmon.run()
+            if changes_count and changes_count > 0:
+                exit_code = 2  # Drift detected
+        else:
+            print("🤖 Hello driftmon!")
+            print("📖 Use --help to see available commands")
+            print("\n📋 Quick start:")
+            print("  driftmon init     # Initialize and take baseline snapshot")
+            print("  driftmon snapshot # Take new snapshot")
+            print("  driftmon diff     # Compare snapshots")
+            print("  driftmon alert    # Check drift and send alerts")
+            print("  driftmon run      # Full workflow")
+            parser.print_help()
+            sys.exit(0)
+    
+    except KeyboardInterrupt:
+        print("\n⚠️  Operation cancelled by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
+    
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
