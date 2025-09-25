@@ -1,0 +1,60 @@
+# Driftmon configuration file
+# Monitor and detect drift in AI model outputs
+
+# Files and directories to watch for changes
+watch:
+  - "src/**/*.py"
+  - "lib/**/*.js"
+  - "api/**/*"
+  - "models/**/*"
+
+# Patterns to ignore
+ignore:
+  - "**/__pycache__/**"
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/*.pyc"
+  - "**/.DS_Store"
+
+# Alert configuration
+alerts:
+  enabled: true
+  channels:
+    - type: console
+      level: warning
+    - type: file
+      path: ".drift/alerts.log"
+      level: info
+    # - type: slack
+    #   webhook: YOUR_SLACK_WEBHOOK
+    #   level: critical
+
+# Evaluation rules
+rules:
+  - name: toxicity_check
+    type: toxicity
+    threshold: 0.7
+    action: alert
+  
+  - name: output_length
+    type: length
+    max_tokens: 2048
+    action: warn
+  
+  - name: consistency_check
+    type: consistency
+    compare_with: baseline
+    threshold: 0.85
+    action: log
+
+# Monitoring settings
+monitoring:
+  interval: 300  # Check every 5 minutes
+  batch_size: 10
+  save_artifacts: true
+  artifact_retention_days: 30
+
+# Model configuration reference
+model_config: "./config/models.yaml"
+routing_config: "./config/routing.yaml"
+eval_config: "./config/evals.json"

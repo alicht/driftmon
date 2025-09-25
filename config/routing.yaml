@@ -1,0 +1,20 @@
+# Routing rules for driftmon
+# Define which models to use for different scenarios
+
+routing:
+  default: gpt-4o
+  
+  rules:
+    - pattern: "*.test.*"
+      model: gpt-3.5-turbo
+      reason: "Use cheaper model for test files"
+    
+    - pattern: "*.md"
+      model: gpt-3.5-turbo
+      reason: "Documentation can use simpler model"
+    
+    - pattern: "critical/*"
+      model: gpt-4o
+      reason: "Critical paths need best model"
+
+fallback: gpt-3.5-turbo

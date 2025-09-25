@@ -1,0 +1,66 @@
+# Driftmon ignore patterns
+# Files matching these patterns will not be monitored
+
+# Documentation
+*.md
+README.*
+CHANGELOG.*
+LICENSE*
+
+# Internal drift storage
+.drift/**
+.drift/artifacts/**
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.hypothesis/
+
+# Node (if using any JS components)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

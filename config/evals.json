@@ -1,0 +1,15 @@
+{
+  "toxicity_threshold": 0.7,
+  "bias_threshold": 0.8,
+  "quality_threshold": 0.6,
+  "drift_detection": {
+    "enabled": true,
+    "sensitivity": "medium",
+    "window_size": 100
+  },
+  "alerts": {
+    "slack_webhook": null,
+    "email": null,
+    "console": true
+  }
+}

@@ -1,0 +1,17 @@
+# Model configuration for driftmon
+# Define available models and their settings
+
+models:
+  - name: gpt-4o
+    provider: openai
+    parameters:
+      temperature: 0.7
+      max_tokens: 2048
+    
+  - name: gpt-3.5-turbo
+    provider: openai
+    parameters:
+      temperature: 0.5
+      max_tokens: 1024
+
+default_model: gpt-4o
