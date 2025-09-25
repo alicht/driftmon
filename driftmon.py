@@ -10,8 +10,13 @@ import os
 import json
 import yaml
 import hashlib
+import sqlite3
+import uuid
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
+import glob
+import fnmatch
 
 
 def canon_bytes(path: Path) -> str:
@@ -81,9 +86,11 @@ class Driftmon:
         self.config: Dict[str, Any] = {}
         self.drift_dir = Path(".drift")
         self.artifacts_dir = self.drift_dir / "artifacts"
+        self.db_path = self.drift_dir / "snapshots.sqlite"
         
         self._ensure_directories()
         self._load_config()
+        self._init_database()
     
     def _ensure_directories(self):
         """Ensure required directories exist"""
@@ -98,6 +105,24 @@ class Driftmon:
             print(f"Loaded configuration from {self.config_path}")
         else:
             print(f"Warning: Configuration file {self.config_path} not found")
+    
+    def _init_database(self):
+        """Initialize SQLite database for snapshots"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS snapshots (
+                run_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                hash TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                PRIMARY KEY (run_id, path)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
     
     def watch(self, paths: Optional[list] = None):
         """Start watching specified paths for drift"""
@@ -152,6 +177,81 @@ class Driftmon:
         except Exception as e:
             print(f"Error processing file: {e}")
             sys.exit(1)
+    
+    def _get_files_to_watch(self) -> List[Path]:
+        """Get list of files matching watch patterns from config"""
+        watch_patterns = self.config.get('watch', [])
+        ignore_patterns = self.config.get('ignore', [])
+        
+        files = []
+        for pattern in watch_patterns:
+            # Use glob to expand the pattern
+            matches = glob.glob(pattern, recursive=True)
+            for match in matches:
+                path = Path(match)
+                if path.is_file():
+                    # Check if file should be ignored
+                    should_ignore = False
+                    for ignore_pattern in ignore_patterns:
+                        if glob.fnmatch.fnmatch(str(path), ignore_pattern):
+                            should_ignore = True
+                            break
+                    
+                    if not should_ignore:
+                        files.append(path)
+        
+        return files
+    
+    def snapshot(self):
+        """Take a snapshot of all watched files"""
+        # Generate unique run ID
+        run_id = str(uuid.uuid4())
+        timestamp = datetime.now().isoformat()
+        
+        print(f"Creating snapshot with run_id: {run_id}")
+        print(f"Timestamp: {timestamp}")
+        
+        # Get files to snapshot
+        files = self._get_files_to_watch()
+        
+        if not files:
+            print("No files found to snapshot based on watch patterns.")
+            return
+        
+        # Connect to database
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Process each file
+        snapshot_count = 0
+        error_count = 0
+        
+        for file_path in files:
+            try:
+                hash_value, _ = fingerprint(file_path)
+                
+                # Insert into database
+                cursor.execute('''
+                    INSERT INTO snapshots (run_id, path, hash, timestamp)
+                    VALUES (?, ?, ?, ?)
+                ''', (run_id, str(file_path), hash_value, timestamp))
+                
+                snapshot_count += 1
+                print(f"  ✓ {file_path}: {hash_value[:12]}...")
+                
+            except Exception as e:
+                error_count += 1
+                print(f"  ✗ {file_path}: {e}")
+        
+        conn.commit()
+        conn.close()
+        
+        # Print summary
+        print(f"\nSnapshot Summary:")
+        print(f"  Files processed: {snapshot_count}")
+        if error_count > 0:
+            print(f"  Errors: {error_count}")
+        print(f"  Snapshot saved to: {self.db_path}")
 
 
 def main():
@@ -203,6 +303,9 @@ def main():
         help="File path to hash"
     )
     
+    # Snapshot command
+    snapshot_parser = subparsers.add_parser("snapshot", help="Take a snapshot of all watched files")
+    
     args = parser.parse_args()
     
     # Create driftmon instance
@@ -219,6 +322,8 @@ def main():
         driftmon.status()
     elif args.command == "hash":
         driftmon.hash(args.file)
+    elif args.command == "snapshot":
+        driftmon.snapshot()
     else:
         print("Hello driftmon!")
         print("Use --help to see available commands")
