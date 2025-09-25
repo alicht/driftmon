@@ -1,0 +1,317 @@
+name: Drift Detection
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'tests/**'
+      - '.github/**'
+  
+  pull_request:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+      - 'tests/**'
+      - '.github/**'
+  
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+  
+  workflow_dispatch:
+    # Allow manual triggering
+
+env:
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  drift-detection:
+    name: Monitor Configuration Drift
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for proper drift detection
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Install dependencies from requirements.txt
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            # Fallback if requirements.txt doesn't exist
+            pip install pyyaml pytest
+          fi
+      
+      - name: Validate driftmon configuration
+        run: |
+          echo "🔍 Validating driftmon configuration..."
+          if [ ! -f driftmon.yml ]; then
+            echo "❌ driftmon.yml not found"
+            exit 1
+          fi
+          
+          # Basic YAML validation
+          python -c "import yaml; yaml.safe_load(open('driftmon.yml'))"
+          echo "✅ Configuration is valid"
+      
+      - name: Initialize drift monitoring (first run)
+        id: init-check
+        run: |
+          echo "🚀 Checking if this is first run..."
+          if [ ! -d ".drift" ]; then
+            echo "📸 First run detected - initializing driftmon..."
+            python driftmon.py init
+            echo "first_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "📁 Existing .drift directory found"
+            echo "first_run=false" >> $GITHUB_OUTPUT
+          fi
+        continue-on-error: false
+      
+      - name: Run drift detection
+        id: drift-check
+        run: |
+          echo "🔄 Running drift detection workflow..."
+          
+          # Run driftmon and capture exit code
+          set +e  # Don't exit on non-zero return code
+          python driftmon.py run
+          DRIFT_EXIT_CODE=$?
+          set -e  # Re-enable exit on error
+          
+          echo "Exit code: $DRIFT_EXIT_CODE"
+          echo "drift_exit_code=$DRIFT_EXIT_CODE" >> $GITHUB_OUTPUT
+          
+          # Set outputs based on exit code
+          if [ $DRIFT_EXIT_CODE -eq 0 ]; then
+            echo "✅ No drift detected"
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "drift_status=success" >> $GITHUB_OUTPUT
+          elif [ $DRIFT_EXIT_CODE -eq 2 ]; then
+            echo "🚨 Configuration drift detected!"
+            echo "drift_detected=true" >> $GITHUB_OUTPUT
+            echo "drift_status=drift" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Driftmon execution failed (exit code: $DRIFT_EXIT_CODE)"
+            echo "drift_detected=false" >> $GITHUB_OUTPUT
+            echo "drift_status=error" >> $GITHUB_OUTPUT
+            exit $DRIFT_EXIT_CODE
+          fi
+        continue-on-error: false
+      
+      - name: Collect drift artifacts
+        if: steps.drift-check.outputs.drift_detected == 'true'
+        run: |
+          echo "📁 Collecting drift artifacts..."
+          
+          # Create artifacts directory
+          mkdir -p drift-artifacts
+          
+          # Copy diff reports
+          if [ -d ".drift/artifacts" ]; then
+            cp -r .drift/artifacts/* drift-artifacts/ 2>/dev/null || true
+          fi
+          
+          # Copy alerts log
+          if [ -f ".drift/alerts.log" ]; then
+            cp .drift/alerts.log drift-artifacts/
+          fi
+          
+          # Generate summary report
+          cat > drift-artifacts/summary.md << EOF
+          # Drift Detection Summary
+          
+          **Date**: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Trigger**: ${{ github.event_name }}
+          **Branch**: ${{ github.ref_name }}
+          **Commit**: ${{ github.sha }}
+          
+          ## Detection Results
+          
+          - **Status**: Configuration drift detected 🚨
+          - **Artifacts**: $(find .drift/artifacts -name "*.diff.txt" 2>/dev/null | wc -l) diff report(s)
+          - **Alert Log**: $([ -f ".drift/alerts.log" ] && echo "Available" || echo "Not found")
+          
+          ## Next Steps
+          
+          1. Review the diff reports in this artifact
+          2. Assess the impact of detected changes
+          3. Update configurations if changes are intentional
+          4. Take a new baseline snapshot after fixes
+          
+          ## Files in this Artifact
+          
+          \`\`\`
+          $(find drift-artifacts -type f | sort)
+          \`\`\`
+          
+          ---
+          Generated by Driftmon CI Pipeline
+          EOF
+          
+          echo "📋 Artifact summary:"
+          find drift-artifacts -type f | sort
+      
+      - name: Upload drift artifacts
+        if: steps.drift-check.outputs.drift_detected == 'true'
+        uses: actions/upload-artifact@v3
+        with:
+          name: drift-detection-report-${{ github.run_number }}
+          path: drift-artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: Create drift detection issue (scheduled runs only)
+        if: steps.drift-check.outputs.drift_detected == 'true' && github.event_name == 'schedule'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const title = `🚨 Configuration Drift Detected - ${new Date().toISOString().split('T')[0]}`;
+            const body = `
+            # Configuration Drift Alert
+            
+            Automated drift detection has identified changes in monitored configuration files.
+            
+            ## Detection Details
+            
+            - **Date**: ${new Date().toISOString()}
+            - **Workflow Run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - **Commit**: ${{ github.sha }}
+            - **Branch**: ${{ github.ref_name }}
+            
+            ## Artifacts
+            
+            📁 **Drift Report**: Download the \`drift-detection-report-${{ github.run_number }}\` artifact from the workflow run for detailed diff reports.
+            
+            ## Recommended Actions
+            
+            1. 🔍 **Review Changes**: Download and examine the drift artifacts
+            2. 🧐 **Assess Impact**: Determine if changes are intentional or unexpected
+            3. ✅ **Update Baseline**: Run \`driftmon snapshot\` after reviewing changes
+            4. 🔧 **Fix Issues**: Address any unintended configuration drift
+            
+            ## Auto-Resolution
+            
+            This issue will be automatically closed when no drift is detected in subsequent runs.
+            
+            ---
+            *This issue was created automatically by the Drift Detection workflow*
+            `;
+            
+            // Check if there's already an open drift issue
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'drift-detection'
+            });
+            
+            const existingIssue = issues.data.find(issue => 
+              issue.title.includes('Configuration Drift Detected')
+            );
+            
+            if (existingIssue) {
+              // Update existing issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `## New Drift Detection - ${new Date().toISOString().split('T')[0]}
+                
+                Another drift detection has occurred. See [workflow run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.`
+              });
+            } else {
+              // Create new issue
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: title,
+                body: body,
+                labels: ['drift-detection', 'automated']
+              });
+            }
+      
+      - name: Close drift issues (no drift detected)
+        if: steps.drift-check.outputs.drift_detected == 'false' && github.event_name == 'schedule'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Find open drift detection issues
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'drift-detection'
+            });
+            
+            for (const issue of issues.data) {
+              if (issue.title.includes('Configuration Drift Detected')) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  body: `✅ **Drift Resolved**
+                  
+                  No configuration drift detected in the latest run.
+                  
+                  - **Resolution Date**: ${new Date().toISOString()}
+                  - **Workflow Run**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+                  
+                  Closing this issue as the drift has been resolved.`
+                });
+                
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issue.number,
+                  state: 'closed'
+                });
+              }
+            }
+      
+      - name: Set job status
+        run: |
+          echo "🏁 Drift detection workflow completed"
+          
+          DRIFT_STATUS="${{ steps.drift-check.outputs.drift_status }}"
+          echo "Final status: $DRIFT_STATUS"
+          
+          case $DRIFT_STATUS in
+            "success")
+              echo "✅ No drift detected - job succeeded"
+              ;;
+            "drift")
+              echo "🚨 Drift detected - failing job as required"
+              echo "::error::Configuration drift detected. Check artifacts for details."
+              exit 2
+              ;;
+            "error")
+              echo "❌ Execution error - failing job"
+              exit 1
+              ;;
+            *)
+              echo "❓ Unknown status - failing job"
+              exit 1
+              ;;
+          esac
+      
+      - name: Post-run cleanup
+        if: always()
+        run: |
+          echo "🧹 Cleaning up temporary files..."
+          # Clean up any temporary files but preserve .drift directory
+          find . -name "*.pyc" -delete 2>/dev/null || true
+          find . -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+          echo "✅ Cleanup completed"
