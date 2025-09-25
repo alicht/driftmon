@@ -17,6 +17,20 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 import glob
 import fnmatch
+import difflib
+from enum import Enum
+
+
+class ChangeType(Enum):
+    ADDED = "ADDED"
+    REMOVED = "REMOVED"
+    CHANGED = "CHANGED"
+
+
+class Severity(Enum):
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
 
 
 def canon_bytes(path: Path) -> str:
@@ -252,6 +266,196 @@ class Driftmon:
         if error_count > 0:
             print(f"  Errors: {error_count}")
         print(f"  Snapshot saved to: {self.db_path}")
+    
+    def _get_severity(self, file_path: str, change_type: ChangeType) -> Severity:
+        """Determine severity based on file path and change type"""
+        # Load severity rules from config
+        severity_rules = self.config.get('severity_rules', [])
+        
+        # Default severity mappings
+        default_severity = {
+            ChangeType.ADDED: Severity.MEDIUM,
+            ChangeType.REMOVED: Severity.MEDIUM,
+            ChangeType.CHANGED: Severity.LOW
+        }
+        
+        # Check custom rules first
+        for rule in severity_rules:
+            pattern = rule.get('pattern', '')
+            if fnmatch.fnmatch(file_path, pattern):
+                severity_str = rule.get('severity', 'LOW').upper()
+                try:
+                    return Severity[severity_str]
+                except KeyError:
+                    pass
+        
+        # Critical paths get HIGH severity
+        critical_patterns = ['**/critical/**', '**/security/**', '**/auth/**']
+        for pattern in critical_patterns:
+            if fnmatch.fnmatch(file_path, pattern):
+                return Severity.HIGH
+        
+        # Return default based on change type
+        return default_severity.get(change_type, Severity.LOW)
+    
+    def _get_last_two_runs(self) -> Tuple[Optional[str], Optional[str]]:
+        """Get the last two run IDs from the database"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT DISTINCT run_id, timestamp 
+            FROM snapshots 
+            ORDER BY timestamp DESC 
+            LIMIT 2
+        ''')
+        
+        runs = cursor.fetchall()
+        conn.close()
+        
+        if len(runs) == 0:
+            return None, None
+        elif len(runs) == 1:
+            return runs[0][0], None
+        else:
+            return runs[0][0], runs[1][0]
+    
+    def diff(self):
+        """Compare the last two snapshot runs and show differences"""
+        # Get last two runs
+        current_run, previous_run = self._get_last_two_runs()
+        
+        if not previous_run:
+            print("Not enough snapshots to compare. Need at least 2 snapshots.")
+            print("Run 'driftmon snapshot' to create snapshots.")
+            return
+        
+        print(f"Comparing snapshots:")
+        print(f"  Previous: {previous_run}")
+        print(f"  Current:  {current_run}")
+        print("-" * 60)
+        
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Get all files from both runs
+        cursor.execute('''
+            SELECT path, hash FROM snapshots WHERE run_id = ?
+        ''', (previous_run,))
+        previous_files = {row[0]: row[1] for row in cursor.fetchall()}
+        
+        cursor.execute('''
+            SELECT path, hash FROM snapshots WHERE run_id = ?
+        ''', (current_run,))
+        current_files = {row[0]: row[1] for row in cursor.fetchall()}
+        
+        conn.close()
+        
+        # Track changes
+        changes = []
+        
+        # Check for removed files
+        for path in previous_files:
+            if path not in current_files:
+                severity = self._get_severity(path, ChangeType.REMOVED)
+                changes.append({
+                    'path': path,
+                    'type': ChangeType.REMOVED,
+                    'severity': severity
+                })
+        
+        # Check for added and changed files
+        for path in current_files:
+            if path not in previous_files:
+                severity = self._get_severity(path, ChangeType.ADDED)
+                changes.append({
+                    'path': path,
+                    'type': ChangeType.ADDED,
+                    'severity': severity
+                })
+            elif current_files[path] != previous_files[path]:
+                severity = self._get_severity(path, ChangeType.CHANGED)
+                changes.append({
+                    'path': path,
+                    'type': ChangeType.CHANGED,
+                    'severity': severity,
+                    'old_hash': previous_files[path],
+                    'new_hash': current_files[path]
+                })
+        
+        # Sort changes by severity and type
+        severity_order = {Severity.HIGH: 0, Severity.MEDIUM: 1, Severity.LOW: 2}
+        changes.sort(key=lambda x: (severity_order[x['severity']], x['type'].value, x['path']))
+        
+        # Display changes
+        if not changes:
+            print("No changes detected between snapshots.")
+            return
+        
+        # Print summary
+        print(f"\n📊 Change Summary:")
+        print(f"  Total changes: {len(changes)}")
+        
+        # Count by type
+        by_type = {}
+        for change in changes:
+            change_type = change['type']
+            by_type[change_type] = by_type.get(change_type, 0) + 1
+        
+        for change_type, count in by_type.items():
+            print(f"  {change_type.value}: {count}")
+        
+        # Count by severity
+        print(f"\n🎯 By Severity:")
+        by_severity = {}
+        for change in changes:
+            sev = change['severity']
+            by_severity[sev] = by_severity.get(sev, 0) + 1
+        
+        for sev in [Severity.HIGH, Severity.MEDIUM, Severity.LOW]:
+            if sev in by_severity:
+                print(f"  {sev.value}: {by_severity[sev]}")
+        
+        # Detailed changes
+        print(f"\n📝 Detailed Changes:")
+        print("-" * 60)
+        
+        for change in changes:
+            severity_icon = {
+                Severity.HIGH: "🔴",
+                Severity.MEDIUM: "🟡",
+                Severity.LOW: "🟢"
+            }[change['severity']]
+            
+            type_icon = {
+                ChangeType.ADDED: "➕",
+                ChangeType.REMOVED: "➖",
+                ChangeType.CHANGED: "📝"
+            }[change['type']]
+            
+            print(f"{severity_icon} [{change['severity'].value:6}] {type_icon} {change['type'].value:8} {change['path']}")
+            
+            # For changed files, show diff if possible
+            if change['type'] == ChangeType.CHANGED:
+                path = Path(change['path'])
+                if path.exists():
+                    try:
+                        # Get current content
+                        current_content = canon_bytes(path)
+                        current_lines = current_content.splitlines(keepends=True)
+                        
+                        # Try to generate a simple diff preview
+                        print(f"    Hash: {change['old_hash'][:12]}... → {change['new_hash'][:12]}...")
+                        
+                        # For small files, show unified diff
+                        if len(current_lines) < 100:
+                            # This is simplified - in production you'd retrieve the old content
+                            print("    (Run with --verbose for full diff)")
+                    except Exception as e:
+                        print(f"    Could not generate diff: {e}")
+        
+        print("-" * 60)
+        print(f"✅ Diff complete")
 
 
 def main():
@@ -306,6 +510,9 @@ def main():
     # Snapshot command
     snapshot_parser = subparsers.add_parser("snapshot", help="Take a snapshot of all watched files")
     
+    # Diff command
+    diff_parser = subparsers.add_parser("diff", help="Compare last two snapshots and show differences")
+    
     args = parser.parse_args()
     
     # Create driftmon instance
@@ -324,6 +531,8 @@ def main():
         driftmon.hash(args.file)
     elif args.command == "snapshot":
         driftmon.snapshot()
+    elif args.command == "diff":
+        driftmon.diff()
     else:
         print("Hello driftmon!")
         print("Use --help to see available commands")

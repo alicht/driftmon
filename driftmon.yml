@@ -54,6 +54,19 @@ monitoring:
   save_artifacts: true
   artifact_retention_days: 30
 
+# Severity rules for different file patterns
+severity_rules:
+  - pattern: "**/critical/**"
+    severity: HIGH
+  - pattern: "**/auth/**"
+    severity: HIGH
+  - pattern: "*.config.*"
+    severity: MEDIUM
+  - pattern: "**/test/**"
+    severity: LOW
+  - pattern: "*.md"
+    severity: LOW
+
 # Model configuration reference
 model_config: "./config/models.yaml"
 routing_config: "./config/routing.yaml"
