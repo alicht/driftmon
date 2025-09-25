@@ -19,6 +19,8 @@ import glob
 import fnmatch
 import difflib
 from enum import Enum
+import urllib.request
+import urllib.error
 
 
 class ChangeType(Enum):
@@ -320,20 +322,29 @@ class Driftmon:
         else:
             return runs[0][0], runs[1][0]
     
-    def diff(self):
-        """Compare the last two snapshot runs and show differences"""
+    def diff(self, return_changes=False):
+        """Compare the last two snapshot runs and show differences
+        
+        Args:
+            return_changes: If True, return changes dict instead of printing
+            
+        Returns:
+            Optional dict with changes data if return_changes is True
+        """
         # Get last two runs
         current_run, previous_run = self._get_last_two_runs()
         
         if not previous_run:
-            print("Not enough snapshots to compare. Need at least 2 snapshots.")
-            print("Run 'driftmon snapshot' to create snapshots.")
-            return
+            if not return_changes:
+                print("Not enough snapshots to compare. Need at least 2 snapshots.")
+                print("Run 'driftmon snapshot' to create snapshots.")
+            return None if return_changes else None
         
-        print(f"Comparing snapshots:")
-        print(f"  Previous: {previous_run}")
-        print(f"  Current:  {current_run}")
-        print("-" * 60)
+        if not return_changes:
+            print(f"Comparing snapshots:")
+            print(f"  Previous: {previous_run}")
+            print(f"  Current:  {current_run}")
+            print("-" * 60)
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -386,6 +397,15 @@ class Driftmon:
         # Sort changes by severity and type
         severity_order = {Severity.HIGH: 0, Severity.MEDIUM: 1, Severity.LOW: 2}
         changes.sort(key=lambda x: (severity_order[x['severity']], x['type'].value, x['path']))
+        
+        # If returning changes, prepare the result
+        if return_changes:
+            return {
+                'current_run': current_run,
+                'previous_run': previous_run,
+                'changes': changes,
+                'total': len(changes)
+            }
         
         # Display changes
         if not changes:
@@ -456,6 +476,232 @@ class Driftmon:
         
         print("-" * 60)
         print(f"✅ Diff complete")
+    
+    def _save_artifact(self, content: str, artifact_type: str = "diff") -> str:
+        """Save artifact to the artifacts directory
+        
+        Args:
+            content: Content to save
+            artifact_type: Type of artifact (e.g., 'diff', 'alert')
+            
+        Returns:
+            Path to saved artifact
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        artifact_path = self.artifacts_dir / f"{timestamp}.{artifact_type}.txt"
+        
+        with open(artifact_path, 'w') as f:
+            f.write(content)
+        
+        return str(artifact_path)
+    
+    def _send_slack_alert(self, webhook_url: str, message: dict) -> bool:
+        """Send alert to Slack webhook
+        
+        Args:
+            webhook_url: Slack webhook URL
+            message: Message payload
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            data = json.dumps(message).encode('utf-8')
+            req = urllib.request.Request(
+                webhook_url,
+                data=data,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            with urllib.request.urlopen(req) as response:
+                return response.status == 200
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"Failed to send Slack alert: {e}")
+            return False
+    
+    def alert(self):
+        """Check for drift and send alerts if configured"""
+        # Get diff data
+        diff_data = self.diff(return_changes=True)
+        
+        if not diff_data:
+            print("No snapshots available for comparison.")
+            return
+        
+        if diff_data['total'] == 0:
+            print("No drift detected. No alerts sent.")
+            return
+        
+        # Determine overall severity
+        severities = [change['severity'] for change in diff_data['changes']]
+        if Severity.HIGH in severities:
+            overall_severity = "HIGH"
+            severity_color = "danger"
+        elif Severity.MEDIUM in severities:
+            overall_severity = "MEDIUM"
+            severity_color = "warning"
+        else:
+            overall_severity = "LOW"
+            severity_color = "good"
+        
+        # Generate diff content for artifact
+        artifact_content = f"Drift Detection Report\n"
+        artifact_content += f"Generated: {datetime.now().isoformat()}\n"
+        artifact_content += f"Previous Run: {diff_data['previous_run']}\n"
+        artifact_content += f"Current Run: {diff_data['current_run']}\n"
+        artifact_content += f"Total Changes: {diff_data['total']}\n"
+        artifact_content += "=" * 60 + "\n\n"
+        
+        # Count changes by type
+        by_type = {}
+        for change in diff_data['changes']:
+            change_type = change['type']
+            by_type[change_type] = by_type.get(change_type, 0) + 1
+        
+        # Add summary to artifact
+        artifact_content += "SUMMARY\n"
+        artifact_content += "-" * 40 + "\n"
+        for change_type, count in by_type.items():
+            artifact_content += f"{change_type.value}: {count}\n"
+        artifact_content += "\n"
+        
+        # Add detailed changes
+        artifact_content += "DETAILED CHANGES\n"
+        artifact_content += "-" * 40 + "\n"
+        for change in diff_data['changes']:
+            artifact_content += f"[{change['severity'].value}] {change['type'].value} {change['path']}\n"
+            if change['type'] == ChangeType.CHANGED:
+                artifact_content += f"  Old hash: {change['old_hash'][:12]}...\n"
+                artifact_content += f"  New hash: {change['new_hash'][:12]}...\n"
+                
+                # Try to generate unified diff for changed files
+                path = Path(change['path'])
+                if path.exists():
+                    try:
+                        current_content = canon_bytes(path)
+                        # In a real implementation, we'd retrieve old content from storage
+                        artifact_content += f"  (Full diff would be generated from stored content)\n"
+                    except Exception as e:
+                        artifact_content += f"  Could not generate diff: {e}\n"
+            artifact_content += "\n"
+        
+        # Save artifact
+        artifact_path = self._save_artifact(artifact_content, "diff")
+        print(f"📁 Diff artifact saved to: {artifact_path}")
+        
+        # Check alert configuration
+        alerts_config = self.config.get('alerts', {})
+        if not alerts_config.get('enabled', False):
+            print("⚠️  Alerts are disabled in configuration.")
+            return
+        
+        # Process each alert channel
+        channels = alerts_config.get('channels', [])
+        alerts_sent = []
+        
+        for channel in channels:
+            channel_type = channel.get('type')
+            
+            if channel_type == 'slack':
+                webhook = channel.get('webhook')
+                if not webhook or webhook == 'YOUR_SLACK_WEBHOOK':
+                    print("⚠️  Slack webhook not configured. Skipping Slack alert.")
+                    continue
+                
+                # Format Slack message
+                slack_message = {
+                    "text": f"🚨 Config Drift Detected: {overall_severity} Severity",
+                    "attachments": [{
+                        "color": severity_color,
+                        "title": f"Drift Detection Report - {overall_severity} Severity",
+                        "fields": [
+                            {
+                                "title": "Total Changes",
+                                "value": str(diff_data['total']),
+                                "short": True
+                            }
+                        ],
+                        "footer": "Driftmon",
+                        "ts": int(datetime.now().timestamp())
+                    }]
+                }
+                
+                # Add change type breakdown
+                for change_type, count in by_type.items():
+                    slack_message["attachments"][0]["fields"].append({
+                        "title": change_type.value,
+                        "value": str(count),
+                        "short": True
+                    })
+                
+                # Add file list (limited to prevent message being too long)
+                file_list = []
+                for i, change in enumerate(diff_data['changes'][:10]):  # Limit to first 10
+                    severity_emoji = {
+                        Severity.HIGH: "🔴",
+                        Severity.MEDIUM: "🟡", 
+                        Severity.LOW: "🟢"
+                    }[change['severity']]
+                    
+                    type_emoji = {
+                        ChangeType.ADDED: "➕",
+                        ChangeType.REMOVED: "➖",
+                        ChangeType.CHANGED: "📝"
+                    }[change['type']]
+                    
+                    file_list.append(f"{severity_emoji} {type_emoji} {change['path']}")
+                
+                if diff_data['total'] > 10:
+                    file_list.append(f"... and {diff_data['total'] - 10} more")
+                
+                slack_message["attachments"][0]["fields"].append({
+                    "title": "Changed Files",
+                    "value": "\n".join(file_list),
+                    "short": False
+                })
+                
+                slack_message["attachments"][0]["fields"].append({
+                    "title": "Artifact Location",
+                    "value": artifact_path,
+                    "short": False
+                })
+                
+                # Send Slack alert
+                if self._send_slack_alert(webhook, slack_message):
+                    alerts_sent.append("Slack")
+                    print("✅ Slack alert sent successfully")
+                else:
+                    print("❌ Failed to send Slack alert")
+            
+            elif channel_type == 'console':
+                # Console output (already done by diff function)
+                print("\n🔔 Console Alert:")
+                print(f"  Severity: {overall_severity}")
+                print(f"  Total drift changes: {diff_data['total']}")
+                for change_type, count in by_type.items():
+                    print(f"  {change_type.value}: {count}")
+                alerts_sent.append("Console")
+            
+            elif channel_type == 'file':
+                alert_log_path = Path(channel.get('path', '.drift/alerts.log'))
+                alert_log_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(alert_log_path, 'a') as f:
+                    f.write(f"\n{'=' * 60}\n")
+                    f.write(f"Alert Generated: {datetime.now().isoformat()}\n")
+                    f.write(f"Severity: {overall_severity}\n")
+                    f.write(f"Total Changes: {diff_data['total']}\n")
+                    f.write(f"Artifact: {artifact_path}\n")
+                    f.write(f"{'=' * 60}\n")
+                
+                alerts_sent.append("File")
+                print(f"📝 Alert logged to: {alert_log_path}")
+        
+        # Summary
+        if alerts_sent:
+            print(f"\n✅ Alerts sent via: {', '.join(alerts_sent)}")
+        else:
+            print("\n⚠️  No alerts were sent (check configuration)")
 
 
 def main():
@@ -513,6 +759,9 @@ def main():
     # Diff command
     diff_parser = subparsers.add_parser("diff", help="Compare last two snapshots and show differences")
     
+    # Alert command
+    alert_parser = subparsers.add_parser("alert", help="Check for drift and send alerts if configured")
+    
     args = parser.parse_args()
     
     # Create driftmon instance
@@ -533,6 +782,8 @@ def main():
         driftmon.snapshot()
     elif args.command == "diff":
         driftmon.diff()
+    elif args.command == "alert":
+        driftmon.alert()
     else:
         print("Hello driftmon!")
         print("Use --help to see available commands")
